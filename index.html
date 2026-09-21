@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pt-BR"><!-- Deploy Vercel2 -->
+<html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -395,7 +395,7 @@
       <div class="settings-group-title">Zona de risco</div>
       <div class="card">
         <button class="btn-danger" id="st-reset">Apagar todos os dados</button>
-        <p class="hint">Os dados ficam salvos apenas neste aparelho, dentro deste app.</p>
+        <p class="hint">Os dados são compartilhados com a família. Apagar remove os dados dos dois celulares. A chave OpenAI permanece somente neste aparelho.</p>
       </div>
     </section>
   </main>
@@ -507,33 +507,221 @@
 
   function uid(){ return 'i'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
+  /* Shared persistence: REST + optimistic concurrency, no extra SDK required. */
+  var CLOUD_URL = 'https://yfabhaquzrmzsdbpwvdx.supabase.co/rest/v1/enxoval';
+  var CLOUD_KEY = 'sb_publishable_RMS05Zhg0hEO_cnEO-Tgfw_PDwPLSg5';
+  var FAMILY = 'familia-rapha';
+  var cloudBase = null, cloudBusy = false, cloudTimer, cloudStarted = false;
+  var cacheOK = true, repaintPending = false, profileDraft = false, keyDraft = false;
+  function copy(value){ return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
+  function same(a,b){ return JSON.stringify(a) === JSON.stringify(b); }
+  // Strip credential fields recursively, including legacy/imported settings.
+  function clean(value){
+    if(Array.isArray(value)) return value.map(clean);
+    if(value && typeof value === 'object'){
+      var out = {};
+      Object.keys(value).forEach(function(k){
+        if(!/key|token|secret|password|authorization|credential/i.test(k) && k !== '__proto__' && k !== 'constructor' && k !== 'prototype') out[k] = clean(value[k]);
+      });
+      return out;
+    }
+    return value;
+  }
+  function shared(){
+    return clean({profile:State.profile, categories:State.categories, items:State.items,
+      places:State.places, settings:State.settings});
+  }
+  function normalize(data){
+    if(!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Formato remoto inválido');
+    if(data.profile != null && (typeof data.profile !== 'object' || Array.isArray(data.profile))) throw new Error('Perfil remoto inválido');
+    ['categories','items','places'].forEach(function(k){
+      if(data[k] !== undefined && (!Array.isArray(data[k]) || data[k].some(function(x){return !x || typeof x !== 'object' || !x.id;}))) throw new Error('Lista remota inválida: '+k);
+    });
+    return clean({profile:data.profile || null,
+      categories:data.categories || copy(DEFAULT_CATEGORIES), items:data.items || [], places:data.places || [],
+      settings:Object.assign({priceSource:'claude'},data.settings || {})});
+  }
+  // Three-way merge: preserve remote fields unchanged locally; merge lists by id.
+  // If the same field changed on both devices, the pending local edit wins.
+  function merge(base,local,remote){
+    if(same(base,local)) return copy(remote);
+    if(same(base,remote) || same(local,remote)) return copy(local);
+    if(Array.isArray(base) && Array.isArray(local) && Array.isArray(remote) &&
+       base.concat(local,remote).every(function(x){return x && x.id;})){
+      var bm = new Map(base.map(function(x){return [x.id,x];}));
+      var lm = new Map(local.map(function(x){return [x.id,x];}));
+      var rm = new Map(remote.map(function(x){return [x.id,x];}));
+      var ids = Array.from(new Set(remote.concat(local).map(function(x){return x.id;})));
+      return ids.map(function(id){
+        // Deletion wins over an edit to the deleted record.
+        if(bm.has(id) && (!lm.has(id) || !rm.has(id))) return undefined;
+        return merge(bm.get(id),lm.get(id),rm.get(id));
+      }).filter(function(x){return x !== undefined;});
+    }
+    if(base && local && remote && typeof base === 'object' && typeof local === 'object' && typeof remote === 'object' && !Array.isArray(base) && !Array.isArray(local) && !Array.isArray(remote)){
+      var result = {};
+      Array.from(new Set(Object.keys(base).concat(Object.keys(local),Object.keys(remote)))).forEach(function(k){
+        var v = merge(base[k],local[k],remote[k]);
+        if(v !== undefined) result[k] = v;
+      });
+      return result;
+    }
+    return copy(local);
+  }
+  function status(message){
+    var node = document.getElementById('cloud-status');
+    if(node) node.textContent = message + (cacheOK ? '' : ' · Cache local indisponível; mantenha o app aberto.');
+  }
+  function cache(){
+    try{
+      var data = shared();
+      // The OpenAI key exists only in this device's cache, never in cloudBase/body.
+      data.settings.openaiKey = State.settings.openaiKey || '';
+      data._sync = {family:FAMILY, base:cloudBase};
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(data));
+      cacheOK = true;
+    }catch(e){ cacheOK = false; }
+  }
   function load(){
     try{
       var raw = localStorage.getItem(STORAGE_KEY);
-      if(!raw){
-        for(var i=0;i<STORAGE_KEYS_OLD.length;i++){
-          raw = localStorage.getItem(STORAGE_KEYS_OLD[i]);
-          if(raw) break;
-        }
-      }
+      if(!raw) STORAGE_KEYS_OLD.some(function(k){raw = localStorage.getItem(k); return !!raw;});
       if(raw){
-        var data = JSON.parse(raw);
-        if(data.profile) State.profile = data.profile;
-        if(data.categories && data.categories.length) State.categories = data.categories;
-        if(data.items) State.items = data.items;
-        if(data.places) State.places = data.places;
-        if(data.settings) State.settings = Object.assign(State.settings, data.settings);
+        var data = JSON.parse(raw), safe = normalize(data);
+        Object.assign(State,safe);
+        State.settings.openaiKey = (data.settings && data.settings.openaiKey) || '';
+        if(data._sync && data._sync.family === FAMILY && data._sync.base) cloudBase = normalize(data._sync.base);
       }
-    }catch(e){ /* storage unavailable or corrupt: start fresh */ }
+    }catch(e){ cacheOK = false; }
+    // First migration adopts populated cloud data; only seed an empty cloud row.
+    if(!cloudBase) cloudBase = shared();
   }
   function save(){
-    try{
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        profile: State.profile, categories: State.categories, items: State.items,
-        places: State.places, settings: State.settings
-      }));
-    }catch(e){ showToast('Não foi possível salvar neste dispositivo.'); }
+    cache();
+    status(navigator.onLine ? 'Alterações aguardando sincronização…' : 'Offline · alterações aguardando envio');
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(syncCloud,600);
   }
+  function editing(){
+    var active = document.activeElement;
+    return active && (active.matches('input,textarea,select') || active.isContentEditable);
+  }
+  function repaint(){
+    if(editing()){ repaintPending = true; return; }
+    repaintPending = false;
+    // Refresh data views without clearing unsaved forms on the other tabs.
+    var category = el('#add-category').value, stage = el('#add-stage-seg').dataset.value;
+    var keyText = el('#st-openai-key').value;
+    renderTopbar(); renderHome(); renderLista(); renderPlaces(); renderSettingsCats(); renderAddForm();
+    if(State.categories.some(function(c){return c.id === category;})) el('#add-category').value = category;
+    if(stage){
+      el('#add-stage-seg').dataset.value = stage;
+      el('#add-stage-seg').querySelectorAll('button').forEach(function(b){b.classList.toggle('sel',b.dataset.val === stage);});
+    }
+    if(!profileDraft) fillProfileForm('st');
+    renderPriceSourceSeg();
+    if(keyDraft) el('#st-openai-key').value = keyText;
+    el('#onboard').style.display = State.profile ? 'none' : 'block';
+  }
+  function adopt(data){
+    var key = State.settings.openaiKey || '', changed = !same(shared(),data);
+    Object.assign(State,copy(data));
+    State.settings.openaiKey = key;
+    cache();
+    if(changed) repaint();
+  }
+  async function requestCloud(suffix,method,body){
+    var controller = new AbortController();
+    var timeout = setTimeout(function(){controller.abort();},12000);
+    try{
+      var response = await fetch(CLOUD_URL+suffix,{
+        method:method || 'GET', cache:'no-store', signal:controller.signal,
+        headers:{apikey:CLOUD_KEY,'Content-Type':'application/json',Prefer:'return=representation'},
+        body:body === undefined ? undefined : JSON.stringify(clean(body))
+      });
+      if(!response.ok) throw new Error('HTTP '+response.status);
+      return await response.json();
+    }finally{ clearTimeout(timeout); }
+  }
+  function emptyCloud(data){
+    return !data.profile && !data.categories.length && !data.items.length && !data.places.length &&
+      Object.keys(data.settings).every(function(k){return k === 'priceSource' && data.settings[k] === 'claude';});
+  }
+  async function syncCloud(){
+    if(cloudBusy) return;
+    if(!navigator.onLine){status('Offline · alterações aguardando envio'); return;}
+    cloudBusy = true;
+    status('Sincronizando…');
+    try{
+      var settled = false;
+      for(var attempt=0; attempt<4; attempt++){
+        var rows = await requestCloud('?codigo=eq.'+encodeURIComponent(FAMILY)+'&select=dados,atualizado_em');
+        if(!Array.isArray(rows) || rows.length > 1) throw new Error('Resposta remota inválida');
+        var row = rows[0], local = shared(), baseline = copy(cloudBase);
+        var remote = row ? normalize(row.dados) : null;
+        var desired = !row || (!cloudStarted && emptyCloud(remote)) ? local : merge(baseline,local,remote);
+        if(row && same(remote,desired)){
+          cloudBase = copy(remote); cloudStarted = true; adopt(desired); settled = true; break;
+        }
+        // Compare-and-swap prevents overwriting another device between GET and PATCH.
+        var stamp = new Date(Math.max(Date.now(),row ? Date.parse(row.atualizado_em)+1 : 0)).toISOString().replace('Z',String(Math.floor(Math.random()*1000)).padStart(3,'0')+'Z');
+        var body = {dados:desired, atualizado_em:stamp};
+        var result;
+        if(row){
+          result = await requestCloud('?codigo=eq.'+encodeURIComponent(FAMILY)+'&atualizado_em=eq.'+encodeURIComponent(row.atualizado_em),'PATCH',body);
+        }else{
+          body.codigo = FAMILY;
+          try{ result = await requestCloud('','POST',body); }
+          catch(e){if(e.message === 'HTTP 409') continue; throw e;}
+        }
+        if(!Array.isArray(result) || !result.length) continue;
+        var committed = normalize(result[0].dados);
+        // Keep edits made while the request was in flight queued for the next save.
+        var next = merge(local,shared(),committed);
+        cloudBase = copy(committed); cloudStarted = true; adopt(next);
+        if(same(next,committed)){settled = true; break;}
+      }
+      if(settled && same(shared(),cloudBase)) status('Sincronizado · família Rapha');
+      else {status('Alterações aguardando envio…'); clearTimeout(cloudTimer); cloudTimer = setTimeout(syncCloud,1000);}
+    }catch(e){
+      cache();
+      status(/HTTP (401|403)/.test(e.message) ? 'Sem acesso ao Supabase · verifique a chave e as permissões da tabela' :
+        /HTTP (400|404)/.test(e.message) ? 'Confira a tabela enxoval no Supabase · alterações mantidas neste aparelho' :
+        'Sem conexão com o Supabase · nova tentativa automática; alterações mantidas neste aparelho');
+    }finally{
+      cloudBusy = false;
+      var cover = document.getElementById('cloud-loading');
+      if(cover) cover.remove();
+    }
+  }
+  function startCloud(){
+    var banner = document.createElement('div');
+    banner.id = 'cloud-status'; banner.setAttribute('role','status');
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:100;padding:calc(env(safe-area-inset-top,0px) + 4px) 8px 4px;background:#E5F1F9;color:#1E2E3A;text-align:center;font:11px Inter,system-ui,sans-serif;';
+    document.body.appendChild(banner);
+    var cover = document.createElement('div');
+    cover.id = 'cloud-loading'; cover.textContent = 'Carregando o enxoval da família…';
+    cover.style.cssText = 'position:fixed;inset:0;z-index:99;background:#F2F8FC;display:grid;place-items:center;font:16px Inter,system-ui,sans-serif;';
+    document.body.appendChild(cover);
+    function trackDraft(ev){
+      if(/^st-(name|birth|uf|city)$/.test(ev.target.id)) profileDraft = true;
+      if(ev.target.id === 'st-openai-key') keyDraft = true;
+    }
+    document.addEventListener('input',trackDraft);
+    document.addEventListener('change',trackDraft);
+    el('#st-sex').addEventListener('click',function(){profileDraft = true;});
+    el('#st-save').addEventListener('click',function(){profileDraft = false;});
+    el('#st-save-key').addEventListener('click',function(){keyDraft = false;});
+    el('#st-reset').addEventListener('click',function(){if(!State.profile){profileDraft = false; keyDraft = false;}});
+    window.addEventListener('online',syncCloud);
+    window.addEventListener('offline',function(){status('Offline · alterações aguardando envio');});
+    document.addEventListener('visibilitychange',function(){if(!document.hidden) syncCloud();});
+    document.addEventListener('focusout',function(){setTimeout(function(){if(repaintPending) repaint();},0);});
+    setInterval(function(){if(!document.hidden) syncCloud();},5000);
+    if(!navigator.onLine) cover.remove();
+    syncCloud();
+  }
+
 
   function fmtMoney(v){
     v = v || 0;
@@ -1283,7 +1471,7 @@
 
   /* ---------------- reset ---------------- */
   el('#st-reset').addEventListener('click', function(){
-    if(!confirm('Isso vai apagar o perfil do bebê e todos os itens, lugares e categorias cadastrados neste aparelho. Deseja continuar?')) return;
+    if(!confirm('Isso vai apagar o perfil do bebê e todos os itens, lugares e categorias compartilhados com sua família, nos dois celulares. Deseja continuar?')) return;
     State.profile = null;
     State.categories = DEFAULT_CATEGORIES.slice().map(function(c){return Object.assign({},c);});
     State.items = [];
@@ -1293,6 +1481,7 @@
       localStorage.removeItem(STORAGE_KEY);
       STORAGE_KEYS_OLD.forEach(function(k){ localStorage.removeItem(k); });
     }catch(e){}
+    save();
     renderAll();
     el('#onboard').style.display = 'block';
   });
@@ -1401,6 +1590,7 @@
     el('#onboard').style.display = 'block';
   }
   renderAll();
+  startCloud();
 })();
 </script>
 </body>
