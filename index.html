@@ -270,14 +270,39 @@
         </div>
         <div class="hero-stats">
           <div class="row"><span class="label">Itens comprados</span><span class="value" id="home-acq">0 / 0</span></div>
-          <div class="row"><span class="label">Valor total gasto</span><span class="value" id="home-val">R$ 0,00</span></div>
+          <div class="row"><span class="label">Gasto calculado nos itens</span><span class="value" id="home-val">R$ 0,00</span></div>
           <div class="row"><span class="label">Categorias em dia</span><span class="value" id="home-cats">0 / 0</span></div>
         </div>
       </div>
+      <div class="card">
+        <div class="field">
+          <label for="home-manual-total">Total gasto informado por vocês (R$)</label>
+          <input id="home-manual-total" type="text" inputmode="decimal" placeholder="Ex.: 1.250,50" aria-describedby="home-manual-hint">
+          <p class="hint" id="home-manual-hint">Valor geral preenchido manualmente, compartilhado entre os aparelhos. Não é somado ao gasto calculado dos itens e não muda com o filtro de fase.</p>
+        </div>
+        <button class="btn-secondary" id="home-save-total">Salvar total gasto</button>
+      </div>
+      <button class="btn-primary" id="home-open-report" style="margin-bottom:18px;">Relatório do que está faltando</button>
       <div class="loc-line" id="home-loc"></div>
       <div class="chiprow" id="home-stage-chips"></div>
       <div class="section-title">Por categoria</div>
       <div id="home-cat-list"></div>
+    </section>
+
+    <!-- RELATÓRIO DE FALTANTES -->
+    <section class="view" id="view-report">
+      <button class="btn-secondary" id="report-back" style="margin-bottom:16px;">Voltar ao resumo</button>
+      <div class="section-title">O que está faltando</div>
+      <p class="hint">Lista dos itens cadastrados cuja quantidade estimada ainda não foi adquirida, agrupada por categoria.</p>
+      <div class="card">
+        <div class="row-2">
+          <div class="field"><label for="report-category">Categoria</label><select id="report-category"><option value="">Todas as categorias</option></select></div>
+          <div class="field"><label for="report-stage">Fase</label><select id="report-stage"><option value="">Todas as fases</option></select></div>
+        </div>
+        <button class="btn-secondary" id="report-clear">Ver relatório completo</button>
+      </div>
+      <p id="report-summary" role="status"></p>
+      <div id="report-results"></div>
     </section>
 
     <!-- LISTA -->
@@ -820,7 +845,76 @@
     }
   }
 
+  /* Missing-items report and family-wide manually entered spending. */
+  var manualTotalDraft = false;
+  function parseManualTotal(raw){
+    var text = raw.trim().replace(/^R\$\s*/, '').replace(/\s/g,'');
+    if(!text) return null;
+    if(!/^(?:\d+|\d{1,3}(?:\.\d{3})+)(?:,\d{1,2})?$/.test(text) && !/^\d+\.\d{1,2}$/.test(text)) return NaN;
+    if(text.includes(',')) text = text.replace(/\./g,'').replace(',','.');
+    else if(/^\d{1,3}(?:\.\d{3})+$/.test(text)) text = text.replace(/\./g,'');
+    var value = Number(text);
+    return Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER/100 ? Math.round(value*100)/100 : NaN;
+  }
+  function missingItems(category,stage){
+    return State.items.filter(function(item){
+      return (!category || item.category === category) && (!stage || item.stage === stage);
+    }).map(function(item){
+      var estimated = Math.max(0,Number(item.estQty)||0), acquired = Math.max(0,Number(item.acqQty)||0);
+      return {item:item, estimated:estimated, acquired:acquired, missing:Math.max(0,estimated-acquired)};
+    }).filter(function(row){return row.missing > 0;});
+  }
+  function renderReport(){
+    var catSelect = el('#report-category'), stageSelect = el('#report-stage');
+    var category = catSelect.value || '', stage = stageSelect.value || '';
+    catSelect.innerHTML = '<option value="">Todas as categorias</option>' + State.categories.map(function(c){
+      return '<option value="'+escapeHtml(c.id)+'">'+escapeHtml(c.label)+'</option>';
+    }).join('');
+    catSelect.value = State.categories.some(function(c){return c.id === category;}) ? category : '';
+    stageSelect.innerHTML = '<option value="">Todas as fases</option>' + STAGES.map(function(s){
+      return '<option value="'+escapeHtml(s.id)+'">'+escapeHtml(s.label)+'</option>';
+    }).join('');
+    stageSelect.value = STAGES.some(function(s){return s.id === stage;}) ? stage : '';
+    var rows = missingItems(catSelect.value,stageSelect.value);
+    var quantity = rows.reduce(function(sum,row){return sum+row.missing;},0);
+    el('#report-summary').textContent = rows.length+' '+(rows.length === 1 ? 'item com pendência' : 'itens com pendência')+' · '+quantity+' '+(quantity === 1 ? 'unidade faltando' : 'unidades faltando');
+    if(!rows.length){
+      el('#report-results').innerHTML = '<div class="empty">Nenhum item faltando'+(catSelect.value || stageSelect.value ? ' nos filtros selecionados' : ' entre os itens cadastrados')+'.</div>';
+      return;
+    }
+    var groups = State.categories.map(function(c){return {id:c.id,label:c.label};});
+    if(rows.some(function(r){return !catById(r.item.category);})) groups.push({id:null,label:'Sem categoria'});
+    el('#report-results').innerHTML = groups.map(function(group){
+      var list = rows.filter(function(row){return group.id === null ? !catById(row.item.category) : row.item.category === group.id;});
+      if(!list.length) return '';
+      list.sort(function(a,b){return stageLabel(a.item.stage).localeCompare(stageLabel(b.item.stage),'pt-BR') || a.item.name.localeCompare(b.item.name,'pt-BR');});
+      var total = list.reduce(function(sum,row){return sum+row.missing;},0);
+      return '<div class="card"><h3 style="margin:0 0 12px;">'+escapeHtml(group.label)+' <span class="hint">· '+total+' faltando</span></h3>'+list.map(function(row){
+        return '<div class="item-row"><div class="item-name">'+escapeHtml(row.item.name)+'</div><div class="hint">'+escapeHtml(stageLabel(row.item.stage))+' · Estimado: '+row.estimated+' · Adquirido: '+row.acquired+'</div><strong>Faltam: '+row.missing+'</strong></div>';
+      }).join('')+'</div>';
+    }).join('');
+  }
+  el('#home-manual-total').addEventListener('input',function(){manualTotalDraft = true;});
+  el('#home-save-total').addEventListener('click',function(){
+    var value = parseManualTotal(el('#home-manual-total').value);
+    if(Number.isNaN(value)){showToast('Informe um valor válido, como 1.250,50.');return;}
+    if(value === null) delete State.settings.manualTotalSpent;
+    else State.settings.manualTotalSpent = value;
+    manualTotalDraft = false;
+    save(); renderHome(); showToast('Total gasto salvo.');
+  });
+  el('#home-open-report').addEventListener('click',function(){switchView('report');});
+  el('#report-back').addEventListener('click',function(){switchView('home');});
+  el('#report-category').addEventListener('change',renderReport);
+  el('#report-stage').addEventListener('change',renderReport);
+  el('#report-clear').addEventListener('click',function(){el('#report-category').value='';el('#report-stage').value='';renderReport();});
+
   function renderHome(){
+    if(!manualTotalDraft){
+      var manual = State.settings.manualTotalSpent;
+      el('#home-manual-total').value = typeof manual === 'number' && Number.isFinite(manual) ? manual.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}) : '';
+    }
+    renderReport();
     renderHomeLocation();
     var st = statsFor(State.ui.homeStage);
     el('#home-pct').textContent = st.pct + '%';
@@ -1034,6 +1128,7 @@
 
   /* ---------------- view switching ---------------- */
   function switchView(name){
+    if(name === 'report') renderReport();
     document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('active'); });
     el('#view-'+name).classList.add('active');
     document.querySelectorAll('.tab-btn').forEach(function(b){
@@ -1477,6 +1572,7 @@
     State.items = [];
     State.places = [];
     State.settings = { priceSource:'claude', openaiKey:'' };
+    manualTotalDraft = false;
     try{
       localStorage.removeItem(STORAGE_KEY);
       STORAGE_KEYS_OLD.forEach(function(k){ localStorage.removeItem(k); });
