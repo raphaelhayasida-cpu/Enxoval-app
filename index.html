@@ -289,6 +289,31 @@
       <div id="home-cat-list"></div>
     </section>
 
+    <section class="view" id="view-reports">
+      <div class="section-title">Relatórios</div>
+      <div class="card">
+        <h3>O que falta</h3>
+        <p class="hint">Lista detalhada por categoria, com filtros de categoria e fase.</p>
+        <button class="btn-primary" id="reports-detail">O que falta</button>
+      </div>
+      <div class="card">
+        <h3>O que falta Sumarizado</h3>
+        <p class="hint">Cada tipo de item em um só lugar, com as quantidades faltantes por fase.</p>
+        <button class="btn-primary" id="reports-summary">O que falta Sumarizado</button>
+      </div>
+    </section>
+    <section class="view" id="view-summary-report">
+      <button class="btn-secondary" id="summary-back" style="margin-bottom:16px;">Voltar aos relatórios</button>
+      <div class="section-title">O que falta Sumarizado</div>
+      <p class="hint">Itens com o mesmo nome e categoria são reunidos, com as quantidades que faltam em cada fase. Nomes diferentes permanecem separados.</p>
+      <div class="card"><div class="row-2">
+        <div class="field"><label for="summary-category">Categoria</label><select id="summary-category"><option value="">Todas as categorias</option></select></div>
+        <div class="field"><label for="summary-stage">Fase</label><select id="summary-stage"><option value="">Todas as fases</option></select></div>
+      </div><button class="btn-secondary" id="summary-clear">Ver relatório completo</button></div>
+      <p id="summary-count" role="status"></p>
+      <div id="summary-results"></div>
+    </section>
+
     <!-- RELATÓRIO DE FALTANTES -->
     <section class="view" id="view-report">
       <button class="btn-secondary" id="report-back" style="margin-bottom:16px;">Voltar ao resumo</button>
@@ -442,6 +467,10 @@
       <button class="tab-btn" data-view="add">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
         Adicionar
+      </button>
+      <button class="tab-btn" data-view="reports">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14v18H5zM9 8h6M9 12h6M9 16h4"/></svg>
+        Relatórios
       </button>
       <button class="tab-btn" data-view="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -864,6 +893,44 @@
       return {item:item, estimated:estimated, acquired:acquired, missing:Math.max(0,estimated-acquired)};
     }).filter(function(row){return row.missing > 0;});
   }
+  function summarizedMissing(category,stage){
+    var groups = new Map();
+    missingItems(category,stage).forEach(function(row){
+      var label = String(row.item.name || 'Item sem nome').trim().replace(/\s+/g,' ');
+      var key = JSON.stringify([row.item.category || '',label.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('pt-BR')]);
+      if(!groups.has(key)) groups.set(key,{name:label,category:row.item.category,total:0,stages:new Map()});
+      var group = groups.get(key), phase = row.item.stage;
+      group.total += row.missing;
+      group.stages.set(phase,(group.stages.get(phase)||0)+row.missing);
+    });
+    return Array.from(groups.values()).sort(function(a,b){return a.name.localeCompare(b.name,'pt-BR');});
+  }
+  function renderSummaryReport(){
+    var cat = el('#summary-category'), phase = el('#summary-stage'), oldCat = cat.value, oldPhase = phase.value;
+    cat.innerHTML = '<option value="">Todas as categorias</option>'+State.categories.map(function(c){return '<option value="'+escapeHtml(c.id)+'">'+escapeHtml(c.label)+'</option>';}).join('');
+    cat.value = State.categories.some(function(c){return c.id === oldCat;}) ? oldCat : '';
+    phase.innerHTML = '<option value="">Todas as fases</option>'+STAGES.map(function(s){return '<option value="'+escapeHtml(s.id)+'">'+escapeHtml(s.label)+'</option>';}).join('');
+    phase.value = STAGES.some(function(s){return s.id === oldPhase;}) ? oldPhase : '';
+    var groups = summarizedMissing(cat.value,phase.value);
+    var total = groups.reduce(function(n,g){return n+g.total;},0);
+    el('#summary-count').textContent = groups.length+' '+(groups.length === 1 ? 'tipo de item' : 'tipos de item')+' · '+total+' '+(total === 1 ? 'unidade faltando' : 'unidades faltando');
+    el('#summary-results').innerHTML = groups.length ? groups.map(function(g){
+      var category = catById(g.category);
+      var phases = STAGES.map(function(s){return s.id;});
+      g.stages.forEach(function(_,id){if(phases.indexOf(id)<0) phases.push(id);});
+      return '<div class="card"><h3 style="margin:0;">'+escapeHtml(g.name)+'</h3><p class="hint">'+escapeHtml(category ? category.label : 'Sem categoria')+' · Total faltante: '+g.total+'</p>'+phases.filter(function(id){return g.stages.has(id);}).map(function(id){
+        var quantity = g.stages.get(id);
+        return '<div class="item-row"><strong>'+(quantity === 1 ? 'Falta ' : 'Faltam ')+quantity+'</strong> · '+escapeHtml(stageLabel(id) || 'Sem fase')+'</div>';
+      }).join('')+'</div>';
+    }).join('') : '<div class="empty">Nenhum item faltando'+(cat.value || phase.value ? ' nos filtros selecionados' : ' entre os itens cadastrados')+'.</div>';
+  }
+  el('#reports-detail').addEventListener('click',function(){switchView('report');});
+  el('#reports-summary').addEventListener('click',function(){switchView('summary-report');});
+  el('#summary-back').addEventListener('click',function(){switchView('reports');});
+  el('#summary-category').addEventListener('change',renderSummaryReport);
+  el('#summary-stage').addEventListener('change',renderSummaryReport);
+  el('#summary-clear').addEventListener('click',function(){el('#summary-category').value='';el('#summary-stage').value='';renderSummaryReport();});
+
   function renderReport(){
     var catSelect = el('#report-category'), stageSelect = el('#report-stage');
     var category = catSelect.value || '', stage = stageSelect.value || '';
@@ -915,6 +982,7 @@
       el('#home-manual-total').value = typeof manual === 'number' && Number.isFinite(manual) ? manual.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}) : '';
     }
     renderReport();
+    renderSummaryReport();
     renderHomeLocation();
     var st = statsFor(State.ui.homeStage);
     el('#home-pct').textContent = st.pct + '%';
@@ -1129,10 +1197,11 @@
   /* ---------------- view switching ---------------- */
   function switchView(name){
     if(name === 'report') renderReport();
+    if(name === 'summary-report') renderSummaryReport();
     document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('active'); });
     el('#view-'+name).classList.add('active');
     document.querySelectorAll('.tab-btn').forEach(function(b){
-      b.classList.toggle('active', b.dataset.view===name);
+      b.classList.toggle('active', b.dataset.view===name || (b.dataset.view==='reports' && (name==='report' || name==='summary-report')));
     });
     window.scrollTo({top:0});
   }
